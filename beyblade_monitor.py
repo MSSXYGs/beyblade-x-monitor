@@ -36,12 +36,6 @@ def init_db():
                   source TEXT,
                   first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS ig_posts
-                 (post_id TEXT PRIMARY KEY,
-                  caption TEXT,
-                  post_url TEXT,
-                  source TEXT,
-                  posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS fb_posts
                  (post_id TEXT PRIMARY KEY,
                   content TEXT,
@@ -69,23 +63,6 @@ def save_product(product_code, product_name, status, price, limit_buy, url, sour
     conn.commit()
     conn.close()
 
-def check_ig_post_seen(post_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT post_id FROM ig_posts WHERE post_id=?", (post_id,))
-    res = c.fetchone()
-    conn.close()
-    return res is not None
-
-def save_ig_post(post_id, caption, post_url, source):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''INSERT OR IGNORE INTO ig_posts (post_id, caption, post_url, source)
-                 VALUES (?,?,?,?)''',
-              (post_id, caption, post_url, source))
-    conn.commit()
-    conn.close()
-
 def check_fb_post_seen(post_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -103,7 +80,7 @@ def save_fb_post(post_id, content, post_url, source):
     conn.commit()
     conn.close()
 
-# ========== Telegram 通知 (async) ==========
+# ========== Telegram 通知 ==========
 async def _send_batch_async(batch):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -149,14 +126,17 @@ def send_error_alert(source_name, error_msg):
 
 # ========== HTTP 工具 ==========
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-def safe_get(url, timeout=15, retries=3):
+def safe_get(url, timeout=20, retries=3):
     for i in range(retries):
         try:
             r = SESSION.get(url, timeout=timeout)
@@ -165,14 +145,15 @@ def safe_get(url, timeout=15, retries=3):
         except Exception as e:
             if i == retries - 1:
                 raise e
-            time.sleep(2 * (i + 1))
+            time.sleep(3 * (i + 1))
     return None
 
 # ========== 工具函式 ==========
 def extract_product_code(name, url):
-    bx_match = re.search(r'BX[- ]?\d{2,3}', name, re.IGNORECASE)
-    if bx_match:
-        return bx_match.group(0).upper().replace(' ', '-')
+    for pattern in [r'UX[- ]?\d{2,3}', r'CX[- ]?\d{2,3}', r'BX[- ]?\d{2,3}']:
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match:
+            return match.group(0).upper().replace(' ', '-')
     code_match = re.search(r'\b([A-Z]{2,4}[- ]?\d{2,4}[A-Z]?)\b', name)
     if code_match:
         return code_match.group(1).upper().replace(' ', '-')
@@ -194,25 +175,25 @@ def format_notification(product):
 
 def parse_hobbyland_product(item, source_page):
     try:
-        title_elem = item.select_one(".woocommerce-loop-product__title a, .product-title a, h2 a, h3 a")
+        title_elem = item.select_one(".woocommerce-loop-product__title a, .product-title a, h2 a, h3 a, .woocommerce-LoopProduct-link")
         if not title_elem:
             title_elem = item.find('a', href=True)
         if not title_elem:
             return None
         
         product_name = title_elem.get_text(strip=True)
-        product_url = title_elem['href']
+        product_url = title_elem.get('href', '')
         if not product_url.startswith('http'):
             product_url = "https://www.hobbylandeshop.com" + product_url
         
         product_code = extract_product_code(product_name, product_url)
         
-        price_elem = item.select_one(".price, .woocommerce-Price-amount")
+        price_elem = item.select_one(".price, .woocommerce-Price-amount, .amount")
         price = price_elem.get_text(strip=True) if price_elem else "未標價"
         
-        add_cart = item.select_one(".add_to_cart_button, .single_add_to_cart_button, [data-product_id]")
-        pre_order = item.select_one(".pre-order-btn, .preorder, .onbackorder, .pre-order")
-        out_of_stock = item.select_one(".out-of-stock, .sold-out, .stock.out-of-stock")
+        add_cart = item.select_one(".add_to_cart_button, .single_add_to_cart_button, [data-product_id], .button.product_type_simple")
+        pre_order = item.select_one(".pre-order-btn, .preorder, .onbackorder, .pre-order, .product_type_onbackorder")
+        out_of_stock = item.select_one(".out-of-stock, .sold-out, .stock.out-of-stock, .outofstock")
         
         stock_status = ""
         if out_of_stock:
@@ -220,12 +201,12 @@ def parse_hobbyland_product(item, source_page):
         elif add_cart and not out_of_stock:
             stock_status = "現貨"
         elif pre_order:
-            stock_status = "預訂（待公布到貨日期）"
+            stock_status = "預訂"
         else:
             if price_elem and not add_cart:
                 stock_status = "售罄"
             else:
-                return None
+                stock_status = "未知"
         
         limit_buy = "無"
         limit_elem = item.select_one(".stock-limit, .limit-quantity, .max-quantity")
@@ -247,11 +228,12 @@ def parse_hobbyland_product(item, source_page):
         logger.debug(f"解析產品失敗: {e}")
         return None
 
-# ========== 1. Hobbyland 網店 ==========
+# ========== 1. Hobbyland 網店（主要來源） ==========
 HOBBYLAND_URLS = [
     ("分類頁", "https://www.hobbylandeshop.com/product-category/takaratomy/beyblade%E9%99%80%E8%9E%BA"),
     ("搜尋頁", "https://www.hobbylandeshop.com/product-search/Beyblade%20x"),
     ("標籤頁", "https://www.hobbylandeshop.com/product-tag/BEYBLADEX"),
+    ("主頁搜尋", "https://www.hobbylandeshop.com/?s=Beyblade+X&post_type=product"),
 ]
 
 def scrape_hobbyland_shop():
@@ -261,14 +243,15 @@ def scrape_hobbyland_shop():
     for page_name, url in HOBBYLAND_URLS:
         try:
             logger.info(f"爬取 Hobbyland {page_name}")
+            time.sleep(2)  # 增加延遲，降低被擋機會
             r = safe_get(url)
             soup = BeautifulSoup(r.text, 'html.parser')
             
-            items = soup.select(".product, .product-item, .woocommerce li.product")
+            items = soup.select(".product, .product-item, .woocommerce li.product, li.product, .products .product")
             if not items:
-                items = soup.select("[class*='product'] [class*='item']")
+                items = soup.select("[class*='product']")
             
-            logger.info(f"{page_name} 找到 {len(items)} 個產品")
+            logger.info(f"{page_name} 找到 {len(items)} 個產品元素")
             
             for item in items:
                 product = parse_hobbyland_product(item, page_name)
@@ -290,12 +273,14 @@ def scrape_hobbyland_shop():
                     msg = format_notification(product)
                     notice_list.append(msg)
                     save_product(**product)
+                    logger.info(f"發現新產品: {product['code']} - {product['name']}")
                 else:
                     old_status = old[2]
-                    if old_status == "售罄" and product['status'] in ["現貨", "預訂（待公布到貨日期）"]:
+                    if old_status == "售罄" and product['status'] in ["現貨", "預訂"]:
                         msg = format_notification(product)
                         notice_list.append(msg)
                         save_product(**product)
+                        logger.info(f"產品補貨: {product['code']}")
                     elif old_status != product['status']:
                         save_product(**product)
                         
@@ -306,80 +291,7 @@ def scrape_hobbyland_shop():
     logger.info(f"Hobbyland 網店新增 {len(notice_list)} 項通知")
     return notice_list
 
-# ========== 2. Hobbyland Instagram ==========
-def scrape_hobbyland_ig():
-    notice_list = []
-    try:
-        logger.info("爬取 Hobbyland Instagram @hobbylandhk")
-        url = "https://www.picuki.com/profile/hobbylandhk"
-        r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        posts = soup.select(".box-photo, .post-item, [class*='post']")
-        posts = posts[:20]
-        logger.info(f"Hobbyland IG 找到 {len(posts)} 則貼文")
-        
-        keywords = ["現貨", "到貨", "入荷", "補貨", "Beyblade X", "爆旋陀螺X", "BX-"]
-        
-        for post in posts:
-            try:
-                link_elem = post.find('a', href=True)
-                if not link_elem:
-                    continue
-                post_href = link_elem['href']
-                post_id_match = re.search(r'/p/([^/]+)/', post_href)
-                if not post_id_match:
-                    continue
-                post_id = post_id_match.group(1)
-                
-                if check_ig_post_seen(post_id):
-                    continue
-                
-                caption = ""
-                img = post.find('img')
-                if img and img.get('alt'):
-                    caption = img['alt']
-                elif img and img.get('title'):
-                    caption = img['title']
-                
-                is_related = any(k.lower() in caption.lower() for k in keywords)
-                if not is_related:
-                    save_ig_post(post_id, caption, post_href, "hobbylandhk")
-                    continue
-                
-                code_match = re.search(r'BX[- ]?\d{2,3}', caption, re.IGNORECASE)
-                product_code = code_match.group(0).upper().replace(' ', '-') if code_match else f"IG-{post_id}"
-                
-                if get_old_product(product_code):
-                    save_ig_post(post_id, caption, post_href, "hobbylandhk")
-                    continue
-                
-                product = {
-                    'code': product_code,
-                    'name': caption[:80] + ("..." if len(caption) > 80 else ""),
-                    'status': "現貨（門市到貨）",
-                    'price': "請查詢門市",
-                    'limit': "請查詢門市",
-                    'url': f"https://www.instagram.com/p/{post_id}/",
-                    'source': "IG-hobbylandhk"
-                }
-                
-                msg = format_notification(product)
-                notice_list.append(msg)
-                save_product(**product)
-                save_ig_post(post_id, caption, post_href, "hobbylandhk")
-                
-            except Exception as e:
-                continue
-                
-    except Exception as e:
-        logger.error(f"Hobbyland IG 爬取失敗: {e}")
-        send_error_alert("Hobbyland Instagram", e)
-    
-    logger.info(f"Hobbyland IG 新增 {len(notice_list)} 項通知")
-    return notice_list
-
-# ========== 3. Hobbyland Facebook ==========
+# ========== 2. Hobbyland Facebook ==========
 def scrape_hobbyland_fb():
     notice_list = []
     try:
@@ -388,17 +300,17 @@ def scrape_hobbyland_fb():
         r = safe_get(url, timeout=20)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        posts = soup.select("[role='article'], ._5pcb, .userContentWrapper")
+        posts = soup.select("[role='article'], ._5pcb, .userContentWrapper, .post")
         logger.info(f"Hobbyland FB 找到 {len(posts)} 則貼文")
         
-        keywords = ["現貨", "到貨", "入荷", "補貨", "Beyblade X", "爆旋陀螺", "BX-"]
+        keywords = ["現貨", "到貨", "入荷", "補貨", "Beyblade X", "爆旋陀螺", "BX-", "UX-", "CX-"]
         
         for idx, post in enumerate(posts[:10]):
             try:
-                content_elem = post.select_one(".userContent, [data-testid='post_message']")
+                content_elem = post.select_one(".userContent, [data-testid='post_message'], .text")
                 content = content_elem.get_text(strip=True) if content_elem else ""
                 
-                post_id = f"hobbyland-fb-{idx}-{hash(content[:50])}"
+                post_id = f"hobbyland-fb-{idx}-{hash(content[:50]) if content else idx}"
                 
                 if check_fb_post_seen(post_id):
                     continue
@@ -408,7 +320,7 @@ def scrape_hobbyland_fb():
                     save_fb_post(post_id, content, "", "HobbylandHK")
                     continue
                 
-                code_match = re.search(r'BX[- ]?\d{2,3}', content, re.IGNORECASE)
+                code_match = re.search(r'(UX|CX|BX)[- ]?\d{2,3}', content, re.IGNORECASE)
                 product_code = code_match.group(0).upper().replace(' ', '-') if code_match else f"FB-{post_id}"
                 
                 if get_old_product(product_code):
@@ -440,138 +352,6 @@ def scrape_hobbyland_fb():
     logger.info(f"Hobbyland FB 新增 {len(notice_list)} 項通知")
     return notice_list
 
-# ========== 4. Toysrus Instagram ==========
-def scrape_toysrus_ig():
-    notice_list = []
-    try:
-        logger.info("爬取 Toysrus Instagram @toysrus_hk")
-        url = "https://www.picuki.com/profile/toysrus_hk"
-        r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        posts = soup.select(".box-photo, .post-item, [class*='post']")
-        posts = posts[:20]
-        logger.info(f"Toysrus IG 找到 {len(posts)} 則貼文")
-        
-        keywords = ["Beyblade X", "爆旋陀螺X", "BX-", "陀螺"]
-        
-        for post in posts:
-            try:
-                link_elem = post.find('a', href=True)
-                if not link_elem:
-                    continue
-                post_href = link_elem['href']
-                post_id_match = re.search(r'/p/([^/]+)/', post_href)
-                if not post_id_match:
-                    continue
-                post_id = post_id_match.group(1)
-                
-                if check_ig_post_seen(post_id):
-                    continue
-                
-                caption = ""
-                img = post.find('img')
-                if img and img.get('alt'):
-                    caption = img['alt']
-                
-                is_related = any(k.lower() in caption.lower() for k in keywords)
-                if not is_related:
-                    save_ig_post(post_id, caption, post_href, "toysrus_hk")
-                    continue
-                
-                code_match = re.search(r'BX[- ]?\d{2,3}', caption, re.IGNORECASE)
-                product_code = code_match.group(0).upper().replace(' ', '-') if code_match else f"IG-TR-{post_id}"
-                
-                if get_old_product(product_code):
-                    save_ig_post(post_id, caption, post_href, "toysrus_hk")
-                    continue
-                
-                product = {
-                    'code': product_code,
-                    'name': caption[:80] + ("..." if len(caption) > 80 else ""),
-                    'status': "請查詢門市/網店",
-                    'price': "請查詢門市",
-                    'limit': "請查詢門市",
-                    'url': f"https://www.instagram.com/p/{post_id}/",
-                    'source': "IG-toysrus_hk"
-                }
-                
-                msg = format_notification(product)
-                notice_list.append(msg)
-                save_product(**product)
-                save_ig_post(post_id, caption, post_href, "toysrus_hk")
-                
-            except Exception as e:
-                continue
-                
-    except Exception as e:
-        logger.error(f"Toysrus IG 爬取失敗: {e}")
-        send_error_alert("Toysrus Instagram", e)
-    
-    logger.info(f"Toysrus IG 新增 {len(notice_list)} 項通知")
-    return notice_list
-
-# ========== 5. Toysrus Facebook ==========
-def scrape_toysrus_fb():
-    notice_list = []
-    try:
-        logger.info("爬取 Toysrus Facebook")
-        url = "https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FToysRUsHongKong&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=true&appId"
-        r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        posts = soup.select("[role='article'], ._5pcb, .userContentWrapper")
-        logger.info(f"Toysrus FB 找到 {len(posts)} 則貼文")
-        
-        keywords = ["Beyblade X", "爆旋陀螺", "BX-", "陀螺", "現貨"]
-        
-        for idx, post in enumerate(posts[:10]):
-            try:
-                content_elem = post.select_one(".userContent, [data-testid='post_message']")
-                content = content_elem.get_text(strip=True) if content_elem else ""
-                
-                post_id = f"toysrus-fb-{idx}-{hash(content[:50])}"
-                
-                if check_fb_post_seen(post_id):
-                    continue
-                
-                is_related = any(k.lower() in content.lower() for k in keywords)
-                if not is_related:
-                    save_fb_post(post_id, content, "", "ToysRUsHongKong")
-                    continue
-                
-                code_match = re.search(r'BX[- ]?\d{2,3}', content, re.IGNORECASE)
-                product_code = code_match.group(0).upper().replace(' ', '-') if code_match else f"FB-TR-{post_id}"
-                
-                if get_old_product(product_code):
-                    save_fb_post(post_id, content, "", "ToysRUsHongKong")
-                    continue
-                
-                product = {
-                    'code': product_code,
-                    'name': content[:80] + ("..." if len(content) > 80 else ""),
-                    'status': "請查詢門市/網店",
-                    'price': "請查詢門市",
-                    'limit': "請查詢門市",
-                    'url': "https://www.facebook.com/ToysRUsHongKong",
-                    'source': "FB-ToysRUsHongKong"
-                }
-                
-                msg = format_notification(product)
-                notice_list.append(msg)
-                save_product(**product)
-                save_fb_post(post_id, content, "", "ToysRUsHongKong")
-                
-            except Exception as e:
-                continue
-                
-    except Exception as e:
-        logger.error(f"Toysrus FB 爬取失敗: {e}")
-        send_error_alert("Toysrus Facebook", e)
-    
-    logger.info(f"Toysrus FB 新增 {len(notice_list)} 項通知")
-    return notice_list
-
 # ========== 主流程 ==========
 def run_all_check():
     logger.info("=" * 50)
@@ -580,38 +360,19 @@ def run_all_check():
     
     all_notice = []
     
+    # 主要來源：Hobbyland 網店
     try:
         all_notice += scrape_hobbyland_shop()
     except Exception as e:
         logger.error(f"Hobbyland 網店整體失敗: {e}")
     
-    time.sleep(2)
+    time.sleep(3)
     
-    try:
-        all_notice += scrape_hobbyland_ig()
-    except Exception as e:
-        logger.error(f"Hobbyland IG 整體失敗: {e}")
-    
-    time.sleep(2)
-    
+    # 次要來源：Facebook
     try:
         all_notice += scrape_hobbyland_fb()
     except Exception as e:
         logger.error(f"Hobbyland FB 整體失敗: {e}")
-    
-    time.sleep(2)
-    
-    try:
-        all_notice += scrape_toysrus_ig()
-    except Exception as e:
-        logger.error(f"Toysrus IG 整體失敗: {e}")
-    
-    time.sleep(2)
-    
-    try:
-        all_notice += scrape_toysrus_fb()
-    except Exception as e:
-        logger.error(f"Toysrus FB 整體失敗: {e}")
     
     if all_notice:
         send_telegram_message(all_notice)
