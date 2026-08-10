@@ -4,14 +4,14 @@ import os
 import re
 import sqlite3
 import logging
+import time
+import asyncio
 from datetime import datetime
 from telegram import Bot
 
 # ========== 環境變數 ==========
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
 # ========== 日誌 ==========
 logging.basicConfig(
@@ -103,40 +103,49 @@ def save_fb_post(post_id, content, post_url, source):
     conn.commit()
     conn.close()
 
-# ========== Telegram 通知 ==========
+# ========== Telegram 通知 (async) ==========
+async def _send_batch_async(batch):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    full_text = "\n\n".join(batch)
+    try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=full_text, disable_web_page_preview=True)
+        logger.info(f"已發送 {len(batch)} 則通知")
+    except Exception as e:
+        logger.error(f"Telegram 發送失敗: {e}")
+
 def send_telegram_message(msg_list):
-    if not msg_list or not bot:
+    if not msg_list or not TELEGRAM_BOT_TOKEN:
         return
     batch = []
     current_len = 0
     for msg in msg_list:
         msg_len = len(msg) + 5
         if current_len + msg_len > 3500:
-            _send_batch(batch)
+            asyncio.run(_send_batch_async(batch))
             batch = [msg]
             current_len = msg_len
         else:
             batch.append(msg)
             current_len += msg_len
     if batch:
-        _send_batch(batch)
+        asyncio.run(_send_batch_async(batch))
 
-def _send_batch(batch):
-    full_text = "\n\n".join(batch)
-    try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=full_text, disable_web_page_preview=True)
-        logger.info(f"已發送 {len(batch)} 則通知")
-    except Exception as e:
-        logger.error(f"Telegram 發送失敗: {e}")
-
-def send_error_alert(source_name, error_msg):
-    if not bot:
+async def _send_error_async(source_name, error_msg):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     msg = f"⚠️ 監察暫時失效 - {source_name}\n需要更新 selector / 處理錯誤\n\n錯誤資訊：{str(error_msg)[:200]}"
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
     except Exception as e:
         logger.error(f"錯誤提醒發送失敗: {e}")
+
+def send_error_alert(source_name, error_msg):
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    asyncio.run(_send_error_async(source_name, error_msg))
 
 # ========== HTTP 工具 ==========
 HEADERS = {
@@ -253,7 +262,7 @@ def scrape_hobbyland_shop():
         try:
             logger.info(f"爬取 Hobbyland {page_name}")
             r = safe_get(url)
-            soup = BeautifulSoup(r.text, 'lxml')
+            soup = BeautifulSoup(r.text, 'html.parser')
             
             items = soup.select(".product, .product-item, .woocommerce li.product")
             if not items:
@@ -304,7 +313,7 @@ def scrape_hobbyland_ig():
         logger.info("爬取 Hobbyland Instagram @hobbylandhk")
         url = "https://www.picuki.com/profile/hobbylandhk"
         r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'lxml')
+        soup = BeautifulSoup(r.text, 'html.parser')
         
         posts = soup.select(".box-photo, .post-item, [class*='post']")
         posts = posts[:20]
@@ -377,7 +386,7 @@ def scrape_hobbyland_fb():
         logger.info("爬取 Hobbyland Facebook")
         url = "https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FHobbylandHK&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=true&appId"
         r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'lxml')
+        soup = BeautifulSoup(r.text, 'html.parser')
         
         posts = soup.select("[role='article'], ._5pcb, .userContentWrapper")
         logger.info(f"Hobbyland FB 找到 {len(posts)} 則貼文")
@@ -438,7 +447,7 @@ def scrape_toysrus_ig():
         logger.info("爬取 Toysrus Instagram @toysrus_hk")
         url = "https://www.picuki.com/profile/toysrus_hk"
         r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'lxml')
+        soup = BeautifulSoup(r.text, 'html.parser')
         
         posts = soup.select(".box-photo, .post-item, [class*='post']")
         posts = posts[:20]
@@ -509,7 +518,7 @@ def scrape_toysrus_fb():
         logger.info("爬取 Toysrus Facebook")
         url = "https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FToysRUsHongKong&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=true&appId"
         r = safe_get(url, timeout=20)
-        soup = BeautifulSoup(r.text, 'lxml')
+        soup = BeautifulSoup(r.text, 'html.parser')
         
         posts = soup.select("[role='article'], ._5pcb, .userContentWrapper")
         logger.info(f"Toysrus FB 找到 {len(posts)} 則貼文")
@@ -565,7 +574,6 @@ def scrape_toysrus_fb():
 
 # ========== 主流程 ==========
 def run_all_check():
-    import time
     logger.info("=" * 50)
     logger.info(f"開始執行庫存檢查 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 50)
@@ -614,6 +622,5 @@ def run_all_check():
     logger.info("=" * 50)
 
 if __name__ == "__main__":
-    import time
     init_db()
     run_all_check()
