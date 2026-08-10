@@ -124,7 +124,7 @@ def send_error_alert(source_name, error_msg):
         return
     asyncio.run(_send_error_async(source_name, error_msg))
 
-# ========== HTTP 工具（更穩定） ==========
+# ========== HTTP 工具 ==========
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -236,14 +236,12 @@ def parse_hobbyland_product(item, source_page):
         elif price != "未標價":
             stock_status = "現貨"
         
-        limit_buy = "無"
-        
         return {
             'code': product_code,
             'name': product_name,
             'status': stock_status,
             'price': price,
-            'limit': limit_buy,
+            'limit': "無",
             'url': product_url,
             'source': f"Hobbyland-{source_page}"
         }
@@ -332,25 +330,19 @@ def scrape_hobbyland_shop():
     logger.info(f"Hobbyland 網店本輪新增 {len(notice_list)} 項通知")
     return notice_list
 
-# ========== 2. Hobbyland Facebook ==========
-def scrape_hobbyland_fb():
+# ========== 2. Facebook 通用爬取 ==========
+def scrape_facebook(page_name, page_urls, source_name, keywords):
     notice_list = []
     try:
-        logger.info("爬取 Hobbyland Facebook")
-        urls = [
-            "https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FHobbylandHK&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=true&appId",
-            "https://www.facebook.com/HobbylandHK"
-        ]
+        logger.info(f"爬取 {page_name} Facebook")
         
-        for url in urls:
+        for url in page_urls:
             try:
                 r = safe_get(url, timeout=20)
                 soup = BeautifulSoup(r.text, 'html.parser')
                 
                 posts = soup.select("[role='article'], ._5pcb, .userContentWrapper, .post, div[data-ad-preview='message']")
-                logger.info(f"Facebook 找到 {len(posts)} 則潛在貼文")
-                
-                keywords = ["現貨", "到貨", "入荷", "補貨", "Beyblade", "爆旋", "BX-", "UX-", "CX-", "陀螺"]
+                logger.info(f"{page_name} FB 找到 {len(posts)} 則潛在貼文")
                 
                 for idx, post in enumerate(posts[:15]):
                     try:
@@ -358,21 +350,21 @@ def scrape_hobbyland_fb():
                         if len(content) < 10:
                             continue
                             
-                        post_id = f"fb-{hash(content[:80])}"
+                        post_id = f"{source_name}-{hash(content[:80])}"
                         
                         if check_fb_post_seen(post_id):
                             continue
                         
                         is_related = any(k.lower() in content.lower() for k in keywords)
                         if not is_related:
-                            save_fb_post(post_id, content[:200], "", "HobbylandHK")
+                            save_fb_post(post_id, content[:200], "", source_name)
                             continue
                         
                         code_match = re.search(r'(UX|CX|BX)[- ]?\d{2,3}', content, re.IGNORECASE)
                         product_code = code_match.group(0).upper().replace(' ', '-') if code_match else f"FB-{post_id}"
                         
                         if get_old_product(product_code):
-                            save_fb_post(post_id, content[:200], "", "HobbylandHK")
+                            save_fb_post(post_id, content[:200], "", source_name)
                             continue
                         
                         product = {
@@ -381,15 +373,15 @@ def scrape_hobbyland_fb():
                             'status': "現貨（門市/網店）",
                             'price': "請查詢",
                             'limit': "請查詢",
-                            'url': "https://www.facebook.com/HobbylandHK",
-                            'source': "FB-HobbylandHK"
+                            'url': page_urls[0] if "plugins" not in page_urls[0] else page_urls[-1],
+                            'source': source_name
                         }
                         
                         msg = format_notification(product)
                         notice_list.append(msg)
                         save_product(**product)
-                        save_fb_post(post_id, content[:200], "", "HobbylandHK")
-                        logger.info(f"✅ FB 發現相關貼文: {product_code}")
+                        save_fb_post(post_id, content[:200], "", source_name)
+                        logger.info(f"✅ {page_name} FB 發現相關貼文: {product_code}")
                         
                     except Exception:
                         continue
@@ -398,15 +390,31 @@ def scrape_hobbyland_fb():
                     break
                     
             except Exception as e:
-                logger.warning(f"Facebook URL 失敗: {e}")
+                logger.warning(f"{page_name} Facebook URL 失敗: {e}")
                 continue
                 
     except Exception as e:
-        logger.error(f"Hobbyland FB 爬取失敗: {e}")
-        send_error_alert("Hobbyland Facebook", e)
+        logger.error(f"{page_name} FB 爬取失敗: {e}")
+        send_error_alert(f"{page_name} Facebook", e)
     
-    logger.info(f"Hobbyland FB 本輪新增 {len(notice_list)} 項通知")
+    logger.info(f"{page_name} FB 本輪新增 {len(notice_list)} 項通知")
     return notice_list
+
+def scrape_hobbyland_fb():
+    urls = [
+        "https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FHobbylandHK&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=true&appId",
+        "https://www.facebook.com/HobbylandHK"
+    ]
+    keywords = ["現貨", "到貨", "入荷", "補貨", "Beyblade", "爆旋", "BX-", "UX-", "CX-", "陀螺"]
+    return scrape_facebook("Hobbyland", urls, "FB-HobbylandHK", keywords)
+
+def scrape_toysrus_fb():
+    urls = [
+        "https://www.facebook.com/plugins/page.php?href=https%3A%2F%2Fwww.facebook.com%2FToysRUsHongKong&tabs=timeline&width=500&height=800&small_header=false&adapt_container_width=true&hide_cover=false&show_facepile=true&appId",
+        "https://www.facebook.com/ToysRUsHongKong"
+    ]
+    keywords = ["現貨", "到貨", "入荷", "補貨", "Beyblade", "爆旋", "BX-", "UX-", "CX-", "陀螺"]
+    return scrape_facebook("Toysrus", urls, "FB-ToysRUsHK", keywords)
 
 # ========== 主流程 ==========
 def run_all_check():
@@ -416,6 +424,7 @@ def run_all_check():
     
     all_notice = []
     
+    # 1. Hobbyland 網店
     try:
         all_notice += scrape_hobbyland_shop()
     except Exception as e:
@@ -423,10 +432,19 @@ def run_all_check():
     
     time.sleep(3)
     
+    # 2. Hobbyland Facebook
     try:
         all_notice += scrape_hobbyland_fb()
     except Exception as e:
         logger.error(f"Hobbyland FB 整體失敗: {e}")
+    
+    time.sleep(3)
+    
+    # 3. Toysrus Facebook
+    try:
+        all_notice += scrape_toysrus_fb()
+    except Exception as e:
+        logger.error(f"Toysrus FB 整體失敗: {e}")
     
     if all_notice:
         send_telegram_message(all_notice)
