@@ -290,7 +290,6 @@ def run_once():
     
     all_msgs = []
     
-    # 1. Hobbyland 網站
     try:
         items = scrape_hobbyland_web()
         msg = format_list("Hobbyland 網站", items)
@@ -301,7 +300,6 @@ def run_once():
     
     time.sleep(2)
     
-    # 2. Hobbyland Facebook
     try:
         items = scrape_hobbyland_fb()
         msg = format_list("Hobbyland Facebook", items)
@@ -312,7 +310,6 @@ def run_once():
     
     time.sleep(2)
     
-    # 3. ToysRUs Facebook
     try:
         items = scrape_toysrus_fb()
         msg = format_list("Toys\"R\"Us Facebook", items)
@@ -323,7 +320,6 @@ def run_once():
     
     time.sleep(2)
     
-    # 4. 萬信 Facebook
     try:
         items = scrape_mani_fb()
         msg = format_list("萬信 Facebook", items)
@@ -334,7 +330,6 @@ def run_once():
     
     time.sleep(2)
     
-    # 5. SOGO Facebook
     try:
         items = scrape_sogo_fb()
         msg = format_list("SOGO Facebook", items)
@@ -355,13 +350,19 @@ def run_once():
 
 if __name__ == "__main__":
     init_db()
-    logger.info("Beyblade X 庫存監察啟動（每 5 分鐘）")
+    logger.info("Beyblade X 庫存監察")
     logger.info("範圍：Hobbyland網站+FB / ToysRUs FB / 萬信 FB / SOGO FB")
     
-    while True:
-        try:
-            run_once()
-        except Exception as e:
-            logger.error(f"主循環錯誤: {e}")
-        logger.info("等待 5 分鐘...")
-        time.sleep(300)
+    # GitHub Actions：只跑一次
+    # 本機想持續跑：set LOCAL_LOOP=1
+    if os.environ.get("LOCAL_LOOP") == "1":
+        logger.info("本機循環模式（每 5 分鐘）")
+        while True:
+            try:
+                run_once()
+            except Exception as e:
+                logger.error(f"主循環錯誤: {e}")
+            logger.info("等待 5 分鐘...")
+            time.sleep(300)
+    else:
+        run_once()
